@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "Adamson Flood Demo",
+    "slug": "adamson-flood-demo",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "assets/seal.png",
+    "splash": {
+      "image": "assets/seal.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0b0b0b"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "android": {
+      "package": "com.demo.adamsonflood"
+    },
+    "ios": {
+      "supportsTablet": true
+    }
+  }
+}
