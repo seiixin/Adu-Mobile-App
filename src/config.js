@@ -58,6 +58,7 @@ export const LEVELS = {
     'ZONE-CS': 'Half-tire',
   },
   'Red Warning': {
+    'SV-6': 'Half-tire',
     'SV-10': 'Half-tire',
     'ST-2': 'Half-tire',
     'ST-10': 'Half-tire',
