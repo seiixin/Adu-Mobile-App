@@ -23,6 +23,7 @@ import {
   TouchableWithoutFeedback,
   TouchableOpacity,
 } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { ADVISORIES, POINTS, ZONES, LEVELS, ADVISORY_COLORS } from "./src/config";
 
@@ -49,21 +50,8 @@ const FRIENDLY_GATE_NAMES = {
   "SV-10": "SVP Church Gate",
   "SV-6": "SV Gate",
 };
-
 const friendlyName = (pt) =>
   (pt && (FRIENDLY_GATE_NAMES[pt.id] || pt.name || shortLabelFromId(pt.id))) || "";
-
-// rough mapping just for the gauge subtitle
-const levelToMeters = (label = "") => {
-  const L = (label || "").toLowerCase();
-  if (L.includes("ankle")) return 0.2;
-  if (L.includes("knee")) return 0.5;
-  if (L.includes("waist")) return 1.0;
-  if (L.includes("chest")) return 1.5;
-  if (L.includes("gutter")) return 0.25;
-  if (L.includes("half-tire")) return 0.3;
-  return 0.4;
-};
 
 /* --------------------------------  App  -------------------------------- */
 
@@ -78,8 +66,11 @@ export default function App() {
 function InnerApp() {
   const [screen, setScreen] = useState("advisory");
   const [advisory, setAdvisory] = useState(null);
-  const [showSplash, setShowSplash] = useState(true);
 
+  // how-to modal control lives here so we can decide at the moment of entering the map
+  const [showHowTo, setShowHowTo] = useState(false);
+
+  const [showSplash, setShowSplash] = useState(true);
   const fade = useRef(new Animated.Value(0)).current;
   const splashOpacity = useRef(new Animated.Value(0)).current;
 
@@ -96,13 +87,28 @@ function InnerApp() {
     Animated.timing(fade, { toValue: 1, duration: 300, useNativeDriver: true }).start();
   }, [screen]);
 
-  const goToMap = (a) => {
+  const HOWTO_KEY = "map_howto_hide"; // '1' = don't show again
+
+  const goToMap = async (a) => {
     setAdvisory(a);
+    try {
+      const hide = await AsyncStorage.getItem(HOWTO_KEY);
+      setShowHowTo(hide === "1" ? false : true);
+    } catch {
+      setShowHowTo(true);
+    }
     setScreen("map");
   };
+
   const goBack = () => {
     setScreen("advisory");
     setAdvisory(null);
+  };
+
+  const persistDontShow = async () => {
+    try {
+      await AsyncStorage.setItem(HOWTO_KEY, "1");
+    } catch {}
   };
 
   return (
@@ -114,7 +120,16 @@ function InnerApp() {
         </Animated.View>
       ) : (
         <Animated.View style={{ flex: 1, opacity: fade }}>
-          <MapScreen advisory={advisory} onBack={goBack} />
+          <MapScreen
+            advisory={advisory}
+            onBack={goBack}
+            showHowTo={showHowTo}
+            onCloseHowTo={() => setShowHowTo(false)}
+            onDontShowAgain={async () => {
+              await persistDontShow();
+              setShowHowTo(false);
+            }}
+          />
         </Animated.View>
       )}
 
@@ -149,7 +164,7 @@ function AdvisoryScreen({ onPick }) {
 
       <View style={styles.cardList}>
         {/* Ordered UI only: Red → Yellow → Orange (keeps your data intact) */}
-        {["Red Warning", "Orange Warning","Yellow Warning" ]
+        {["Red Warning", "Orange Warning", "Yellow Warning"]
           .filter((lbl) => ADVISORIES.includes(lbl))
           .map((a) => (
             <Pressable
@@ -168,9 +183,8 @@ function AdvisoryScreen({ onPick }) {
 
 /* ------------------------------ Map Screen ------------------------------ */
 
-function MapScreen({ advisory, onBack }) {
+function MapScreen({ advisory, onBack, showHowTo, onCloseHowTo, onDontShowAgain }) {
   const headerColor = ADVISORY_COLORS[advisory] || "#888";
-
   const [selected, setSelected] = useState(null);
   const [imgMeta, setImgMeta] = useState({ w: 2048, h: 1536 });
   const [container, setContainer] = useState({ w: W, h: H });
@@ -197,21 +211,19 @@ function MapScreen({ advisory, onBack }) {
   const minScale = 1;
   const maxScale = 2;
 
-  // --- tuning ----
-  const MODAL_CLOSE_ZOOM = -10; // clamped anyway
-  const PAN_GUTTER = 140; // px whitespace allowed beyond edges
+  const MODAL_CLOSE_ZOOM = -10;
+  const PAN_GUTTER = 140;
 
   const clamp = (v, min, max) => Math.min(Math.max(v, min), max);
 
   const aspect = imgMeta.w / imgMeta.h;
-  const baseW = Math.max(container.w * 1.4, container.w); // width at scale=1
+  const baseW = Math.max(container.w * 1.4, container.w);
   const baseH = baseW / aspect;
 
   const maxOffset = (s) => ({
     x: Math.max(0, baseW * s - container.w),
     y: Math.max(0, baseH * s - container.h + 140),
   });
-
   const clampOffsets = (ox, oy, s) => {
     const m = maxOffset(s);
     const minX = -m.x - PAN_GUTTER,
@@ -220,7 +232,6 @@ function MapScreen({ advisory, onBack }) {
       maxY = PAN_GUTTER;
     return { x: clamp(ox, minX, maxX), y: clamp(oy, minY, maxY) };
   };
-
   const commit = (s, x, y, animate = true) => {
     const c = clampOffsets(x, y, s);
     scaleRef.current = s;
@@ -234,7 +245,6 @@ function MapScreen({ advisory, onBack }) {
       panY.setValue(c.y);
     }
   };
-
   const zoomToRegion = (id) => {
     const r = REGION_CENTERS[id];
     if (!r) return;
@@ -247,18 +257,14 @@ function MapScreen({ advisory, onBack }) {
     const c = clampOffsets(ox, oy, ns);
     commit(ns, c.x, c.y, true);
   };
-
   const zoomToPoint = (pt, desired = MODAL_CLOSE_ZOOM) => {
     if (!pt) return;
     const target = typeof pt.zoom === "number" ? pt.zoom : desired;
     const ns = clamp(target, minScale, maxScale);
-
-    // use zoom_coordinates if provided, otherwise the point's own x/y
     const zx =
       pt.zoom_coordinates && typeof pt.zoom_coordinates.x === "number" ? pt.zoom_coordinates.x : pt.x;
     const zy =
       pt.zoom_coordinates && typeof pt.zoom_coordinates.y === "number" ? pt.zoom_coordinates.y : pt.y;
-
     const cx = zx * baseW * ns,
       cy = zy * baseH * ns;
     const ox = container.w / 2 - cx,
@@ -266,12 +272,9 @@ function MapScreen({ advisory, onBack }) {
     const c = clampOffsets(ox, oy, ns);
     commit(ns, c.x, c.y, true);
   };
-
-  // +/-/reset
   const stepZoom = (factor) => {
     const curS = scaleRef.current;
     const ns = clamp(curS * factor, minScale, maxScale);
-    // keep current screen center anchored during zoom
     const centerX = (container.w / 2 - offsetRef.current.x) / curS;
     const centerY = (container.h / 2 - offsetRef.current.y) / curS;
     const ox = container.w / 2 - centerX * ns;
@@ -293,7 +296,7 @@ function MapScreen({ advisory, onBack }) {
     if (meta.width && meta.height) setImgMeta({ w: meta.width, h: meta.height });
   }, []);
 
-  // Pan + Pinch gesture
+  // Pan + Pinch
   const responder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: (evt, g) => false,
@@ -320,22 +323,15 @@ function MapScreen({ advisory, onBack }) {
       onPanResponderMove: (evt, g) => {
         const touches = evt.nativeEvent.touches || [];
         if (touches.length >= 2 && pinchRef.current.startDist) {
-          // pinch-zoom
           const [t0, t1] = [touches[0], touches[1]];
           const dx = t1.locationX - t0.locationX;
           const dy = t1.locationY - t0.locationY;
           const curDist = Math.hypot(dx, dy);
-          const ns = clamp(
-            (pinchRef.current.startScale || 1) * (curDist / (pinchRef.current.startDist || 1)),
-            minScale,
-            maxScale
-          );
+          const ns = Math.min(Math.max((pinchRef.current.startScale || 1) * (curDist / (pinchRef.current.startDist || 1)), 1), 2);
           const focalX = (t0.locationX + t1.locationX) / 2;
           const focalY = (t0.locationY + t1.locationY) / 2;
-          // world coords at start focal
           const wx = (focalX - (pinchRef.current.startOffset?.x ?? 0)) / (pinchRef.current.startScale || 1);
           const wy = (focalY - (pinchRef.current.startOffset?.y ?? 0)) / (pinchRef.current.startScale || 1);
-          // keep focal steady
           const ox = focalX - wx * ns;
           const oy = focalY - wy * ns;
           const c = clampOffsets(ox, oy, ns);
@@ -345,41 +341,30 @@ function MapScreen({ advisory, onBack }) {
           scaleRef.current = ns;
           offsetRef.current = { x: c.x, y: c.y };
         } else {
-          // single-finger pan
           const s = scaleRef.current;
           const m = maxOffset(s);
-          const nx = clamp(offsetRef.current.x + g.dx, -m.x - PAN_GUTTER, PAN_GUTTER);
-          const ny = clamp(offsetRef.current.y + g.dy, -m.y - PAN_GUTTER, PAN_GUTTER);
+          const nx = Math.max(Math.min(offsetRef.current.x + g.dx,  PAN_GUTTER), -m.x - PAN_GUTTER);
+          const ny = Math.max(Math.min(offsetRef.current.y + g.dy,  PAN_GUTTER), -m.y - PAN_GUTTER);
           panX.setValue(nx);
           panY.setValue(ny);
         }
       },
-      onPanResponderRelease: (evt, g) => {
-        // keep seeking true; user must hit Center to confirm
-        pinchRef.current = {
-          active: false,
-          startDist: 0,
-          startScale: 1,
-          startOffset: { x: 0, y: 0 },
-          focal: { x: 0, y: 0 },
-        };
-        // snap current values into refs
+      onPanResponderRelease: () => {
+        pinchRef.current = { active: false, startDist: 0, startScale: 1, startOffset: { x: 0, y: 0 }, focal: { x: 0, y: 0 } };
         try {
           offsetRef.current = { x: panX.__getValue(), y: panY.__getValue() };
           scaleRef.current = scale.__getValue();
-        } catch (e) {}
+        } catch {}
       },
       onPanResponderTerminationRequest: () => true,
     })
   ).current;
 
-  // legend slide (kept but hidden in styles)
   const sidebarX = useRef(new Animated.Value(320)).current;
   useEffect(() => {
     Animated.timing(sidebarX, { toValue: showSidebar ? 0 : 320, duration: 250, useNativeDriver: true }).start();
   }, [showSidebar]);
 
-  // DEBUG coordinate picker (triple-tap header)
   const [dbgTap, setDbgTap] = useState(0);
   const dbgTimer = useRef(null);
   const onHeaderPress = () => {
@@ -395,7 +380,6 @@ function MapScreen({ advisory, onBack }) {
     });
   };
 
-  // NEW: return null when no data (modal will show NA_TEXT)
   const levelFor = (id) => {
     const v = LEVELS?.[advisory]?.[id];
     return (typeof v === "string" && v.trim()) ? v : null;
@@ -419,17 +403,10 @@ function MapScreen({ advisory, onBack }) {
     >
       {/* Header */}
       <View style={[styles.header, { backgroundColor: headerColor }]}>
-        <Text onPress={onHeaderPress} style={styles.back}>
-          ‹
-        </Text>
-        <Text style={styles.headerTitle} numberOfLines={1}>
-          Advisory: {advisory}
-        </Text>
+        <Text onPress={onHeaderPress} style={styles.back}>‹</Text>
+        <Text style={styles.headerTitle} numberOfLines={1}>Advisory: {advisory}</Text>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-          {/* Legend/Close removed as requested */}
-          <Pressable onPress={onBack}>
-            <Text style={styles.headerRight}>Change</Text>
-          </Pressable>
+          <Pressable onPress={onBack}><Text style={styles.headerRight}>Change</Text></Pressable>
         </View>
       </View>
 
@@ -438,9 +415,7 @@ function MapScreen({ advisory, onBack }) {
         <View style={styles.centerHintWrap} pointerEvents="none">
           <View style={styles.centerHintCard}>
             <Image source={require("./assets/center.png")} style={{ width: 16, height: 16, marginRight: 6 }} />
-            <Text style={styles.centerHintText}>
-              After pinching or moving, tap Center (🎯) first, then tap a gate.
-            </Text>
+            <Text style={styles.centerHintText}>After pinching or moving, tap Center (🎯) first, then tap a gate.</Text>
           </View>
         </View>
       )}
@@ -497,79 +472,108 @@ function MapScreen({ advisory, onBack }) {
         </Animated.View>
       </View>
 
-      {/* Sidebar legend (hidden via styles) */}
-      <Animated.View style={[styles.sidebar, { transform: [{ translateX: sidebarX }] }]}>
-        <Image source={require("./assets/legend_header.png")} style={styles.legendHeaderImg} resizeMode="contain" />
-        <ScrollView contentContainerStyle={styles.legendScroll}>{/* content kept for future use */}</ScrollView>
-      </Animated.View>
+      {/* Sidebar legend hidden */}
+      <Animated.View style={[styles.sidebar, { transform: [{ translateX: sidebarX }] }]} />
 
       {/* Bottom quick zooms */}
       <View style={styles.quickZoomWrap} pointerEvents="box-none">
         <View style={styles.qzTable}>
-          <TouchableOpacity style={styles.qz} onPress={() => zoomToRegion("STOZ")}>
-            <Text style={styles.qzText}>ST/OZ Building</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.qz} onPress={() => zoomToRegion("CSFRC")}>
-            <Text style={styles.qzText}>CS/FRC Building</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.qz} onPress={() => zoomToRegion("SV")}>
-            <Text style={styles.qzText}>SV Building</Text>
-          </TouchableOpacity>
+          <TouchableOpacity style={styles.qz} onPress={() => zoomToRegion("STOZ")}><Text style={styles.qzText}>ST/OZ Building</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.qz} onPress={() => zoomToRegion("CSFRC")}><Text style={styles.qzText}>CS/FRC Building</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.qz} onPress={() => zoomToRegion("SV")}><Text style={styles.qzText}>SV Building</Text></TouchableOpacity>
         </View>
       </View>
 
       {/* Zoom controls */}
       <View style={styles.zoomFabWrap} pointerEvents="box-none">
         <View style={styles.zoomFabGroup}>
-          <TouchableOpacity style={styles.zoomBtn} onPress={centerConfirm} accessibilityLabel="Center view">
-            <Text style={styles.zoomLbl}>🎯</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.zoomBtn} onPress={zoomIn}>
-            <Text style={styles.zoomLbl}>＋</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.zoomBtn} onPress={zoomOut}>
-            <Text style={styles.zoomLbl}>－</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.zoomBtn} onPress={resetView}>
-            <Text style={styles.zoomLbl}>⟲</Text>
-          </TouchableOpacity>
+          <TouchableOpacity style={styles.zoomBtn} onPress={centerConfirm} accessibilityLabel="Center view"><Text style={styles.zoomLbl}>🎯</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.zoomBtn} onPress={zoomIn}><Text style={styles.zoomLbl}>＋</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.zoomBtn} onPress={zoomOut}><Text style={styles.zoomLbl}>－</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.zoomBtn} onPress={resetView}><Text style={styles.zoomLbl}>⟲</Text></TouchableOpacity>
         </View>
       </View>
 
-      {/* Modal */}
+      {/* Gate modal */}
       <Modal transparent animationType="fade" visible={!!selected} onRequestClose={() => setSelected(null)}>
         <View style={styles.modalBg}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>{friendlyName(selected)}</Text>
             <Text style={styles.modalLabel}>Expected Flood Level</Text>
-
-            {/* Use NA_TEXT when missing */}
-            <Text style={[styles.modalLevel, !currentLevel && { color: "#9ca3af" }]}>
-              {currentLevel || NA_TEXT}
-            </Text>
-
-            {/* Only show chart/placeholder if level exists */}
+            <Text style={[styles.modalLevel, !currentLevel && { color: "#9ca3af" }]}>{currentLevel || NA_TEXT}</Text>
             {currentLevel && (
               <View style={styles.gaugeCard}>
                 <Text style={styles.gaugeTitle}>Expected Flood Level</Text>
-                {/* Image placeholder for the chart */}
                 <Image source={require("./assets/level_placeholder.png")} style={styles.gaugeImg} resizeMode="cover" />
               </View>
             )}
-
-            <Pressable
-              style={styles.closeBtn}
-              onPress={() => {
-                zoomToPoint(selected);
-                setSelected(null);
-              }}
-            >
+            <Pressable style={styles.closeBtn} onPress={() => { zoomToPoint(selected); setSelected(null); }}>
               <Text style={styles.closeBtnText}>Close</Text>
             </Pressable>
           </View>
         </View>
       </Modal>
+
+      {/* HOW-TO MODAL: shows every entry unless "don't show again" */}
+      <HowToModal
+        visible={!!showHowTo}
+        onClose={onCloseHowTo}
+        onDontShowAgain={onDontShowAgain}
+      />
     </SafeAreaView>
+  );
+}
+
+/* ------------------------------ HowTo Modal ----------------------------- */
+
+function HowToModal({ visible, onClose, onDontShowAgain }) {
+  const [dontShow, setDontShow] = useState(false);
+
+  useEffect(() => {
+    if (!visible) setDontShow(false);
+  }, [visible]);
+
+  return (
+    <Modal transparent animationType="fade" visible={visible} onRequestClose={onClose}>
+      <View style={styles.howtoBg}>
+        <View style={styles.howtoCard}>
+          <Text style={styles.howtoTitle}>How to use the map</Text>
+          <View style={{ marginTop: 8, gap: 6 }}>
+            <Bullet>Click a <Text style={{ fontWeight: "800" }}>gate label</Text> on the map to view flood info.</Bullet>
+            <Bullet>Or tap a <Text style={{ fontWeight: "800" }}>Building group</Text> below to zoom to that area.</Bullet>
+            <Bullet>Drag to pan • Use mouse wheel / pinch to zoom.</Bullet>
+          </View>
+
+          <View style={styles.howtoRow}>
+            <Pressable onPress={() => setDontShow((v) => !v)} style={styles.chkBoxWrap}>
+              <View style={[styles.chkBox, dontShow && styles.chkBoxChecked]}>
+                {dontShow && <Text style={styles.chkTick}>✓</Text>}
+              </View>
+              <Text style={styles.howtoChkText}>Don’t show again</Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.howtoCta}
+              onPress={() => {
+                if (dontShow) onDontShowAgain?.();
+                else onClose?.();
+              }}
+            >
+              <Text style={styles.howtoCtaText}>Got it</Text>
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function Bullet({ children }) {
+  return (
+    <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+      <Text style={{ fontSize: 16, lineHeight: 22 }}>•</Text>
+      <Text style={{ flex: 1, fontSize: 14, color: "#111", lineHeight: 20 }}>{children}</Text>
+    </View>
   );
 }
 
@@ -617,7 +621,6 @@ const styles = StyleSheet.create({
   cardText: { color: "#111", fontSize: 18, fontWeight: "700" },
   colorDot: { width: 16, height: 16, borderRadius: 8 },
   note: { color: "#6b7280", paddingHorizontal: 16, marginTop: 8 },
-  code: { fontWeight: "800", color: "#111" },
 
   header: {
     height: 52,
@@ -655,12 +658,7 @@ const styles = StyleSheet.create({
   },
   hitboxText: { fontSize: 12, fontWeight: "800", color: "#111", textAlign: "center" },
 
-  // Hide the legend completely (keep structure for easy re-enable)
   sidebar: { display: "none" },
-  legendHeaderImg: { width: "100%", height: 60, marginTop: 6 },
-  legendScroll: { paddingBottom: 24, paddingHorizontal: 12 },
-  legendGroupTitle: { color: "#111", fontWeight: "800", marginTop: 6 },
-  legendItem: { color: "#374151", marginTop: 4, fontSize: 12 },
 
   modalBg: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", alignItems: "center", justifyContent: "center" },
   modalCard: { width: "85%", backgroundColor: "#fff", borderRadius: 14, padding: 18, gap: 8 },
@@ -678,13 +676,11 @@ const styles = StyleSheet.create({
   },
   closeBtnText: { color: "#fff", fontWeight: "700" },
 
-  // Quick-zoom controls
   quickZoomWrap: { position: "absolute", left: 0, right: 0, bottom: 24, alignItems: "center" },
   qzTable: { backgroundColor: "rgba(255,255,255,0.92)", borderRadius: 12, padding: 8, gap: 8, width: "72%" },
   qz: { backgroundColor: "#f2f2f2", borderRadius: 10, paddingVertical: 10, alignItems: "center" },
   qzText: { color: "#111", fontWeight: "700" },
 
-  // Zoom FABs
   zoomFabWrap: { position: "absolute", right: 16, bottom: 24 },
   zoomFabGroup: { gap: 10 },
   zoomBtn: {
@@ -704,7 +700,6 @@ const styles = StyleSheet.create({
   },
   zoomLbl: { fontSize: 20, fontWeight: "800", color: "#111" },
 
-  // Modal gauge (kept styles; chart replaced by image placeholder)
   gaugeCard: {
     marginTop: 8,
     backgroundColor: "#fff",
@@ -714,25 +709,8 @@ const styles = StyleSheet.create({
     borderColor: "#e5e7eb",
   },
   gaugeTitle: { color: "#111", fontWeight: "700", marginBottom: 6 },
-  gaugeChart: {
-    height: 120,
-    backgroundColor: "#fff",
-    borderRadius: 12,
-    padding: 16,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  gaugeBar: { position: "absolute", height: 18, borderRadius: 9, left: 16, right: 16, bottom: 28, backgroundColor: "#43a047" },
-  gaugeMarker: { position: "absolute", bottom: 28, alignItems: "center" },
-  gaugeDot: { width: 18, height: 18, backgroundColor: "#43a047", borderRadius: 9, position: "absolute", left: -9, bottom: 0 },
-  gaugeStick: { width: 2, height: 60, backgroundColor: "#43a047", position: "absolute", left: 0, top: -60 },
-  gaugeMeters: { position: "absolute", top: -76, left: -22, color: "#43a047", fontSize: 12, fontWeight: "700" },
-  gaugeLabel: { position: "absolute", bottom: 60, fontSize: 22, fontWeight: "700", color: "#111" },
-
-  // Placeholder image style for chart
   gaugeImg: { width: "100%", height: 300, borderRadius: 8, backgroundColor: "#f0f0f0" },
 
-  // Banner styles (below navbar)
   centerHintWrap: { position: "absolute", left: 0, right: 0, top: 100, alignItems: "center", zIndex: 10 },
   centerHintCard: {
     backgroundColor: "rgba(255,255,255,0.95)",
@@ -746,4 +724,27 @@ const styles = StyleSheet.create({
     maxWidth: "92%",
   },
   centerHintText: { color: "#111", fontSize: 12, fontWeight: "600" },
+
+  /* How-to modal styles */
+  howtoBg: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", alignItems: "center", justifyContent: "center" },
+  howtoCard: {
+    width: "86%",
+    backgroundColor: "#fff",
+    borderRadius: 14,
+    padding: 16,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 5,
+  },
+  howtoTitle: { fontSize: 17, fontWeight: "800", color: "#111", marginBottom: 4 },
+  howtoRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 14 },
+  chkBoxWrap: { flexDirection: "row", alignItems: "center", gap: 8 },
+  chkBox: { width: 18, height: 18, borderRadius: 4, borderWidth: 1.5, borderColor: "#444", alignItems: "center", justifyContent: "center" },
+  chkBoxChecked: { backgroundColor: "#111" },
+  chkTick: { color: "#fff", fontSize: 12, lineHeight: 14, fontWeight: "800" },
+  howtoChkText: { color: "#111", fontSize: 13, fontWeight: "600" },
+  howtoCta: { paddingVertical: 8, paddingHorizontal: 14, backgroundColor: "#111", borderRadius: 8 },
+  howtoCtaText: { color: "#fff", fontWeight: "800" },
 });

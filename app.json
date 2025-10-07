@@ -18,6 +18,17 @@
     },
     "ios": {
       "supportsTablet": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "816a0c64-bad6-47d9-b567-74ccb5e9218a"
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/816a0c64-bad6-47d9-b567-74ccb5e9218a"
     }
   }
 }
