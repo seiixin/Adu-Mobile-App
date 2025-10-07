@@ -149,7 +149,7 @@ function AdvisoryScreen({ onPick }) {
 
       <View style={styles.cardList}>
         {/* Ordered UI only: Red → Yellow → Orange (keeps your data intact) */}
-        {["Red Warning", "Yellow Warning", "Orange Warning"]
+        {["Red Warning", "Orange Warning","Yellow Warning" ]
           .filter((lbl) => ADVISORIES.includes(lbl))
           .map((a) => (
             <Pressable

@@ -4,12 +4,12 @@
 // then tap on a spot to log normalized {x,y} to Metro. Paste those here.
 
 // Use advisory labels exactly as shown in the UI:
-export const ADVISORIES = ['Red Warning', 'Yellow Warning', 'Orange Warning'];
+export const ADVISORIES = ['Red Warning', 'Orange Warning','Yellow Warning'];
 
 export const ADVISORY_COLORS = {
   'Red Warning':    '#F44336',
-  'Yellow Warning': '#FFC107',
   'Orange Warning': '#FF9800',
+  'Yellow Warning': '#FFC107',
 };
 
 // Seven clickable numbers only (coords/zoom preserved exactly)
